@@ -2,6 +2,7 @@ package com.stickerzap.app.provider
 
 import android.graphics.BitmapFactory
 import com.stickerzap.app.data.StickerPack
+import com.stickerzap.app.media.AnimatedWebpMuxer
 import com.stickerzap.app.media.StickerProcessor
 import java.io.File
 
@@ -35,6 +36,8 @@ object PackValidator {
         if (pack.stickers.size > StickerPackContract.MAX_STICKERS) {
             return "O WhatsApp aceita no máximo ${StickerPackContract.MAX_STICKERS} figurinhas por álbum."
         }
+        val typeError = validatePackTypes(pack)
+        if (typeError != null) return typeError
 
         val trayFile = File(packDir, pack.trayImageFile)
         if (!trayFile.exists()) {
@@ -62,21 +65,97 @@ object PackValidator {
             if (!file.exists()) {
                 return "Arquivo da figurinha não encontrado: ${sticker.imageFileName}"
             }
-            if (file.length() > StickerPackContract.STATIC_STICKER_MAX_BYTES) {
-                val kb = file.length() / 1024
-                return "A figurinha \"${sticker.name}\" tem ${kb}KB (limite: 100KB)."
-            }
-            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(file.absolutePath, opts)
-            if (opts.outWidth != StickerPackContract.STICKER_SIZE_PX ||
-                opts.outHeight != StickerPackContract.STICKER_SIZE_PX
-            ) {
-                return "A figurinha \"${sticker.name}\" precisa ter 512×512 px " +
-                    "(atual: ${opts.outWidth}×${opts.outHeight})."
+            val animated = pack.animatedStickerPack || sticker.isAnimated
+            if (animated) {
+                if (file.length() > StickerPackContract.ANIMATED_STICKER_MAX_BYTES) {
+                    return animatedTooBig(sticker.name)
+                }
+                val bytesError = validateAnimatedBytes(file.readBytes(), sticker.name)
+                if (bytesError != null) return bytesError
+            } else {
+                val accessError = validateAccessibility(sticker.name, animated = false)
+                if (accessError != null) return accessError
+                if (file.length() > StickerPackContract.STATIC_STICKER_MAX_BYTES) {
+                    val kb = file.length() / 1024
+                    return "A figurinha \"${sticker.name}\" tem ${kb}KB (limite: 100KB)."
+                }
+                val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.absolutePath, opts)
+                if (opts.outWidth != StickerPackContract.STICKER_SIZE_PX ||
+                    opts.outHeight != StickerPackContract.STICKER_SIZE_PX
+                ) {
+                    return "A figurinha \"${sticker.name}\" precisa ter 512×512 px " +
+                        "(atual: ${opts.outWidth}×${opts.outHeight})."
+                }
             }
         }
         return null
     }
+
+    fun validatePackTypes(pack: StickerPack): String? {
+        if (pack.stickers.isEmpty()) return null
+        val animatedCount = pack.stickers.count { it.isAnimated }
+        val mixed = animatedCount > 0 && animatedCount < pack.stickers.size
+        if (mixed) {
+            return "Este álbum mistura figurinhas estáticas e animadas."
+        }
+        val allAnimated = animatedCount == pack.stickers.size
+        if (pack.animatedStickerPack && !allAnimated) {
+            return "Este álbum é de figurinhas animadas."
+        }
+        if (!pack.animatedStickerPack && allAnimated) {
+            return "Este álbum é de figurinhas estáticas."
+        }
+        return null
+    }
+
+    fun validateAnimatedBytes(bytes: ByteArray, name: String): String? {
+        if (bytes.size > StickerPackContract.ANIMATED_STICKER_MAX_BYTES) {
+            return animatedTooBig(name)
+        }
+        val accessError = validateAccessibility(name, animated = true)
+        if (accessError != null) return accessError
+        val info = try {
+            AnimatedWebpMuxer.inspect(bytes)
+        } catch (_: Exception) {
+            return "A figurinha \"$name\" não é um WebP animado válido."
+        }
+        if (!info.animated) {
+            return "A figurinha \"$name\" não é um WebP animado válido."
+        }
+        if (info.canvasWidth != StickerPackContract.STICKER_SIZE_PX ||
+            info.canvasHeight != StickerPackContract.STICKER_SIZE_PX
+        ) {
+            return "A figurinha \"$name\" precisa ter 512×512 px " +
+                "(atual: ${info.canvasWidth}×${info.canvasHeight})."
+        }
+        var total = 0
+        for (duration in info.frameDurationsMs) {
+            if (duration < StickerPackContract.MIN_FRAME_DURATION_MS) {
+                return "A figurinha \"$name\" tem um quadro mais curto que 8 ms."
+            }
+            total += duration
+        }
+        if (total > StickerPackContract.MAX_ANIMATION_DURATION_MS) {
+            return "A figurinha \"$name\" passa de 10 segundos."
+        }
+        return null
+    }
+
+    fun validateAccessibility(text: String, animated: Boolean): String? {
+        val limit = if (animated) {
+            StickerPackContract.ANIMATED_ACCESSIBILITY_MAX
+        } else {
+            StickerPackContract.STATIC_ACCESSIBILITY_MAX
+        }
+        if (text.length > limit) {
+            return "O texto de acessibilidade passa de $limit caracteres."
+        }
+        return null
+    }
+
+    private fun animatedTooBig(name: String): String =
+        "A figurinha \"$name\" passa de 500KB."
 
     private fun verifyTray(trayFile: File): String? {
         if (!trayFile.exists()) return "Falta o ícone da bandeja (tray.png)."

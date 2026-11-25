@@ -4,11 +4,13 @@ import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -30,24 +32,53 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import coil.ImageLoader
 import coil.compose.AsyncImage
+import coil.compose.LocalImageLoader
+import coil.decode.ImageDecoderDecoder
+import com.stickerzap.app.R
 import com.stickerzap.app.data.StickerItem
 import com.stickerzap.app.data.StickerPack
 import com.stickerzap.app.data.StickerRepository
 import com.stickerzap.app.media.AudioHelper
+import com.stickerzap.app.media.CropMath
+import com.stickerzap.app.media.HandoffExport
+import com.stickerzap.app.media.MediaPaths
+import com.stickerzap.app.media.NoVideoTrackException
+import com.stickerzap.app.media.SquareVideoExporter
 import com.stickerzap.app.media.StickerProcessor
+import com.stickerzap.app.media.VideoProbe
+import com.stickerzap.app.media.WhatsAppShare
 import com.stickerzap.app.provider.StickerPackContract
 import com.stickerzap.app.provider.WhatsAppIntegrator
+import com.stickerzap.app.ui.ImportedVideo
+import com.stickerzap.app.ui.SoundGuideSheet
+import com.stickerzap.app.ui.StickerWithSound
+import com.stickerzap.app.ui.VideoEditorScreen
+import com.stickerzap.app.ui.rememberStorageGate
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
+            val imageLoader = remember {
+                ImageLoader.Builder(this)
+                    .components {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            add(ImageDecoderDecoder.Factory())
+                        }
+                    }
+                    .build()
+            }
             MaterialTheme(
                 colorScheme = darkColorScheme(
                     primary = Color(0xFF00A884),
@@ -56,7 +87,9 @@ class MainActivity : ComponentActivity() {
                     surfaceVariant = Color(0xFF202C33)
                 )
             ) {
-                StickerZapApp()
+                CompositionLocalProvider(LocalImageLoader provides imageLoader) {
+                    StickerZapApp()
+                }
             }
         }
     }
@@ -74,6 +107,8 @@ fun StickerZapApp() {
     var currentTab by remember { mutableIntStateOf(0) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var waErrorDialog by remember { mutableStateOf<String?>(null) }
+    var importedVideo by remember { mutableStateOf<ImportedVideo?>(null) }
+    var handoff by remember { mutableStateOf<HandoffExport?>(null) }
     val chatMessages = remember { mutableStateListOf<Pair<String, StickerItem?>>() }
 
     fun showMessage(msg: String, asDialog: Boolean = false) {
@@ -111,7 +146,7 @@ fun StickerZapApp() {
             )
         },
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF111B21)) {
+            if (importedVideo == null) NavigationBar(containerColor = Color(0xFF111B21)) {
                 NavigationBarItem(
                     selected = currentTab == 0,
                     onClick = { currentTab = 0 },
@@ -142,13 +177,62 @@ fun StickerZapApp() {
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding).background(Color(0xFF0B141A))) {
-            when (currentTab) {
+            val editing = importedVideo
+            if (editing != null) {
+                VideoEditorScreen(
+                    video = editing,
+                    packs = packs,
+                    selectedPackId = selectedPackId,
+                    onSelectPack = { selectedPackId = it },
+                    onCreateAnimatedPack = { name ->
+                        val newPack = StickerPack(
+                            identifier = "pack_${System.currentTimeMillis()}",
+                            name = StickerPackContract.clampName(name, "Animadas"),
+                            publisher = "Você",
+                            animatedStickerPack = true
+                        )
+                        packs = packs + newPack
+                        selectedPackId = newPack.identifier
+                        repo.savePacks(packs)
+                    },
+                    repo = repo,
+                    audioHelper = audioHelper,
+                    onClose = { importedVideo = null },
+                    onStickerSaved = { packId, item ->
+                        val target = packs.firstOrNull { it.identifier == packId }
+                        if (target != null && target.animatedStickerPack != item.isAnimated) {
+                            statusMessage = context.getString(
+                                if (target.animatedStickerPack) R.string.album_mismatch_animated
+                                else R.string.album_mismatch_static
+                            )
+                        } else packs = packs.map {
+                            if (it.identifier == packId) {
+                                val nextVersion = (it.imageDataVersion.toIntOrNull() ?: 1) + 1
+                                it.copy(
+                                    stickers = it.stickers + item,
+                                    imageDataVersion = nextVersion.toString()
+                                )
+                            } else it
+                        }
+                        repo.savePacks(packs)
+                    },
+                    onMessage = { statusMessage = it },
+                    onHandoff = { handoff = it }
+                )
+            } else when (currentTab) {
                 0 -> StudioScreen(
                     packs = packs,
                     selectedPackId = selectedPackId,
                     onSelectPack = { selectedPackId = it },
                     audioHelper = audioHelper,
                     onStickerSaved = { packId, item ->
+                        val target = packs.firstOrNull { it.identifier == packId }
+                        if (target != null && target.animatedStickerPack != item.isAnimated) {
+                            statusMessage = context.getString(
+                                if (target.animatedStickerPack) R.string.album_mismatch_animated
+                                else R.string.album_mismatch_static
+                            )
+                        } else {
                         packs = packs.map {
                             if (it.identifier == packId) {
                                 val nextVersion = (it.imageDataVersion.toIntOrNull() ?: 1) + 1
@@ -159,9 +243,13 @@ fun StickerZapApp() {
                             } else it
                         }
                         repo.savePacks(packs)
-                        statusMessage = "Figurinha \"${item.name}\" salva!"
+                        if (!item.isAnimated) {
+                            statusMessage = "Figurinha \"${item.name}\" salva!"
+                        }
+                        }
                     },
-                    onError = { statusMessage = it }
+                    onError = { statusMessage = it },
+                    onVideoReady = { importedVideo = it }
                 )
                 1 -> AlbumsScreen(
                     packs = packs,
@@ -169,11 +257,12 @@ fun StickerZapApp() {
                     repo = repo,
                     audioHelper = audioHelper,
                     onSelectPack = { selectedPackId = it },
-                    onCreatePack = { name, publisher ->
+                    onCreatePack = { name, publisher, animated ->
                         val newPack = StickerPack(
                             identifier = "pack_${System.currentTimeMillis()}",
                             name = StickerPackContract.clampName(name, "Álbum"),
-                            publisher = StickerPackContract.clampName(publisher, "Você")
+                            publisher = StickerPackContract.clampName(publisher, "Você"),
+                            animatedStickerPack = animated
                         )
                         packs = packs + newPack
                         selectedPackId = newPack.identifier
@@ -199,7 +288,9 @@ fun StickerZapApp() {
                     onTestInPreview = { item ->
                         chatMessages.add("Figurinha enviada" to item)
                         currentTab = 2
-                    }
+                    },
+                    onHandoff = { handoff = it },
+                    onMessage = { statusMessage = it }
                 )
                 2 -> PreviewScreen(
                     packs = packs,
@@ -223,6 +314,10 @@ fun StickerZapApp() {
             }
         )
     }
+
+    handoff?.let { export ->
+        SoundGuideSheet(export = export, onDismiss = { handoff = null })
+    }
 }
 
 @Composable
@@ -232,8 +327,11 @@ fun StudioScreen(
     onSelectPack: (String) -> Unit,
     audioHelper: AudioHelper,
     onStickerSaved: (String, StickerItem) -> Unit,
-    onError: (String) -> Unit
+    onError: (String) -> Unit,
+    onVideoReady: (ImportedVideo) -> Unit
 ) {
+    val scope = rememberCoroutineScope()
+    var importing by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val repo = remember { StickerRepository(context) }
 
@@ -248,6 +346,33 @@ fun StudioScreen(
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) selectedImageUri = uri
+    }
+
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+        importing = true
+        scope.launch {
+            val id = UUID.randomUUID().toString().take(8)
+            val dest = File(MediaPaths.videosDir(context), "$id.mp4")
+            try {
+                val meta = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        dest.outputStream().use { input.copyTo(it) }
+                    } ?: throw java.io.IOException("copy")
+                    VideoProbe.read(dest)
+                }
+                onVideoReady(ImportedVideo(id, dest, meta))
+            } catch (_: NoVideoTrackException) {
+                dest.delete()
+                onError(context.getString(R.string.video_no_track))
+            } catch (_: Exception) {
+                dest.delete()
+                onError(context.getString(R.string.video_copy_failed))
+            } finally {
+                importing = false
+            }
+        }
+        }
     }
 
     val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -288,6 +413,23 @@ fun StudioScreen(
                             Icon(Icons.Default.Image, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
                             Text("Escolher Foto")
+                        }
+                        Button(
+                            onClick = {
+                                videoPicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
+                                )
+                            },
+                            enabled = !importing,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (importing) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Movie, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text(stringResource(R.string.studio_import_video))
+                            }
                         }
                     }
 
@@ -381,6 +523,11 @@ fun StudioScreen(
                     Button(
                         onClick = {
                             val uri = selectedImageUri
+                            val target = packs.firstOrNull { it.identifier == selectedPackId }
+                            if (target?.animatedStickerPack == true) {
+                                onError(context.getString(R.string.album_mismatch_animated))
+                                return@Button
+                            }
                             if (uri == null) {
                                 onError("Escolha uma imagem primeiro.")
                                 return@Button
@@ -441,13 +588,21 @@ fun AlbumsScreen(
     repo: StickerRepository,
     audioHelper: AudioHelper,
     onSelectPack: (String) -> Unit,
-    onCreatePack: (String, String) -> Unit,
+    onCreatePack: (String, String, Boolean) -> Unit,
     onAddToWhatsApp: (StickerPack) -> Unit,
-    onTestInPreview: (StickerItem) -> Unit
+    onTestInPreview: (StickerItem) -> Unit,
+    onHandoff: (HandoffExport) -> Unit,
+    onMessage: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var showNewDialog by remember { mutableStateOf(false) }
     var newPackName by remember { mutableStateOf("") }
     var newPackAuthor by remember { mutableStateOf("Você") }
+    var newPackAnimated by remember { mutableStateOf(false) }
+    var options by remember { mutableStateOf<StickerItem?>(null) }
+    var exporting by remember { mutableStateOf(false) }
+    val gate = rememberStorageGate { onMessage(context.getString(R.string.storage_permission)) }
 
     val activePack = packs.firstOrNull { it.identifier == selectedPackId } ?: packs.firstOrNull()
 
@@ -459,15 +614,25 @@ fun AlbumsScreen(
 
         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(packs) { p ->
+                val type = stringResource(
+                    if (p.animatedStickerPack) R.string.album_type_animated else R.string.album_type_static
+                )
                 FilterChip(
                     selected = p.identifier == activePack?.identifier,
                     onClick = { onSelectPack(p.identifier) },
-                    label = { Text("${p.name} (${p.stickers.size})") }
+                    label = { Text("${p.name} · $type (${p.stickers.size})") }
                 )
             }
         }
 
         activePack?.let { pack ->
+            if (pack.animatedStickerPack) {
+                Text(
+                    stringResource(R.string.whatsapp_animated_note),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF8696A0)
+                )
+            }
             Button(
                 onClick = { onAddToWhatsApp(pack) },
                 modifier = Modifier.fillMaxWidth(),
@@ -478,34 +643,108 @@ fun AlbumsScreen(
                 Text("Adicionar Álbum ao WhatsApp (mín. 3)", fontWeight = FontWeight.Bold)
             }
 
-            LazyVerticalGrid(columns = GridCells.Fixed(3), verticalArrangement = Arrangement.spacedBy(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 items(pack.stickers) { item ->
                     val imgFile = File(repo.packDir(pack.identifier), item.imageFileName)
+                    val audio = repo.resolveSound(pack.identifier, item)
                     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF111B21))) {
                         Column(modifier = Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Box {
-                                AsyncImage(
-                                    model = imgFile,
-                                    contentDescription = item.name,
-                                    modifier = Modifier.size(84.dp).clickable { onTestInPreview(item) }
-                                )
-                                if (item.soundFileName != null) {
-                                    IconButton(
-                                        onClick = {
-                                            audioHelper.playFile(File(repo.packDir(pack.identifier), item.soundFileName))
-                                        },
-                                        modifier = Modifier.align(Alignment.BottomEnd).size(28.dp).clip(CircleShape).background(Color(0xCC000000))
-                                    ) {
-                                        Icon(Icons.Default.VolumeUp, contentDescription = "Ouvir", tint = Color(0xFF25D366), modifier = Modifier.size(16.dp))
-                                    }
+                            StickerWithSound(
+                                item = item,
+                                imageFile = imgFile,
+                                videoFile = repo.resolveVideo(item),
+                                audioFile = audio,
+                                audioHelper = audioHelper,
+                                modifier = Modifier.size(84.dp),
+                                onOpen = { onTestInPreview(item) }
+                            )
+                            Text(item.name, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            if (item.hasSound || item.sourceVideoFile != null) {
+                                TextButton(onClick = { options = item }) {
+                                    Text(stringResource(R.string.sticker_options), style = MaterialTheme.typography.labelSmall)
                                 }
                             }
-                            Text(item.name, style = MaterialTheme.typography.labelSmall, maxLines = 1)
                         }
                     }
                 }
             }
         }
+    }
+
+    options?.let { item ->
+        val pack = activePack
+        val audio = pack?.let { repo.resolveSound(it.identifier, item) }
+        AlertDialog(
+            onDismissRequest = { options = null },
+            title = { Text(item.name) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (item.isAnimated) Text(stringResource(R.string.whatsapp_animated_note))
+                    if (audio != null) {
+                        TextButton(onClick = {
+                            WhatsAppShare.shareAudioToWhatsApp(context, audio)
+                            options = null
+                        }) { Text(stringResource(R.string.share_audio)) }
+                        TextButton(onClick = {
+                            WhatsAppShare.shareAudioChooser(context, audio)
+                            options = null
+                        }) { Text(stringResource(R.string.share_generic)) }
+                    }
+                    if (item.sourceVideoFile != null) {
+                        TextButton(
+                            enabled = !exporting,
+                            onClick = {
+                                val video = repo.resolveVideo(item)
+                                if (video == null) {
+                                    onMessage(context.getString(R.string.export_failed))
+                                    return@TextButton
+                                }
+                                gate {
+                                    exporting = true
+                                    scope.launch {
+                                        try {
+                                            val meta = withContext(Dispatchers.IO) { VideoProbe.read(video) }
+                                            val crop = CropMath.NormRect.fromList(item.cropRect)
+                                                ?: CropMath.cover(meta.width, meta.height)
+                                            val start = item.trimStartMs ?: 0L
+                                            val end = item.trimEndMs ?: minOf(meta.durationMs, start + 5_000L)
+                                            val replacement = if (
+                                                item.soundLabel != null &&
+                                                item.soundLabel != StickerItem.SOUND_FROM_VIDEO
+                                            ) audio else null
+                                            val export = SquareVideoExporter(context).exportForWhatsApp(
+                                                sourceVideo = video,
+                                                metadata = meta,
+                                                startMs = start,
+                                                endMs = end,
+                                                crop = crop,
+                                                stickerName = item.name,
+                                                replacementAudio = replacement,
+                                                fileStem = item.id
+                                            )
+                                            options = null
+                                            onHandoff(export)
+                                        } catch (e: Exception) {
+                                            onMessage(e.message ?: context.getString(R.string.export_failed))
+                                        } finally {
+                                            exporting = false
+                                        }
+                                    }
+                                }
+                            }
+                        ) { Text(stringResource(if (exporting) R.string.export_working else R.string.make_with_sound)) }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { options = null }) { Text("OK") }
+            }
+        )
     }
 
     if (showNewDialog) {
@@ -516,13 +755,19 @@ fun AlbumsScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(value = newPackName, onValueChange = { newPackName = it }, label = { Text("Nome do álbum") })
                     OutlinedTextField(value = newPackAuthor, onValueChange = { newPackAuthor = it }, label = { Text("Autor") })
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = newPackAnimated, onCheckedChange = { newPackAnimated = it })
+                        Text(stringResource(R.string.new_album_animated))
+                    }
+                    Text(stringResource(R.string.album_type_help), style = MaterialTheme.typography.bodySmall)
                 }
             },
             confirmButton = {
                 Button(onClick = {
                     if (newPackName.isNotBlank()) {
-                        onCreatePack(newPackName.trim(), newPackAuthor.ifBlank { "Você" })
+                        onCreatePack(newPackName.trim(), newPackAuthor.ifBlank { "Você" }, newPackAnimated)
                         newPackName = ""
+                        newPackAnimated = false
                         showNewDialog = false
                     }
                 }) { Text("Criar") }
@@ -542,7 +787,6 @@ fun PreviewScreen(
     onSendSticker: (StickerItem) -> Unit
 ) {
     val activePack = packs.firstOrNull { it.identifier == selectedPackId } ?: packs.firstOrNull()
-    var playingId by remember { mutableStateOf<String?>(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         LazyColumn(modifier = Modifier.weight(1f).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -550,43 +794,33 @@ fun PreviewScreen(
                 if (sticker != null && activePack != null) {
                     val imgFile = File(repo.packDir(activePack.identifier), sticker.imageFileName)
                     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                        Box(modifier = Modifier.size(140.dp)) {
-                            AsyncImage(model = imgFile, contentDescription = sticker.name, modifier = Modifier.fillMaxSize())
-                            if (sticker.soundFileName != null) {
-                                Surface(
-                                    onClick = {
-                                        playingId = sticker.id
-                                        audioHelper.playFile(File(repo.packDir(activePack.identifier), sticker.soundFileName)) {
-                                            playingId = null
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    color = if (playingId == sticker.id) Color(0xFF25D366) else Color(0xCC000000),
-                                    modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp)
-                                ) {
-                                    Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.VolumeUp, contentDescription = null, modifier = Modifier.size(14.dp), tint = if (playingId == sticker.id) Color.Black else Color(0xFF25D366))
-                                        Spacer(Modifier.width(4.dp))
-                                        Text(if (playingId == sticker.id) "Tocando" else "Ouvir", style = MaterialTheme.typography.labelSmall, color = if (playingId == sticker.id) Color.Black else Color.White)
-                                    }
-                                }
-                            }
-                        }
+                        StickerWithSound(
+                            item = sticker,
+                            imageFile = imgFile,
+                            videoFile = repo.resolveVideo(sticker),
+                            audioFile = repo.resolveSound(activePack.identifier, sticker),
+                            audioHelper = audioHelper,
+                            modifier = Modifier.size(140.dp),
+                            playVideoFallback = true
+                        )
                     }
                 }
             }
         }
 
-        // Sticker tray
         Surface(color = Color(0xFF111B21)) {
             LazyRow(modifier = Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 val stickers = activePack?.stickers ?: emptyList()
                 items(stickers) { s ->
                     val imgFile = File(repo.packDir(activePack!!.identifier), s.imageFileName)
-                    AsyncImage(
-                        model = imgFile,
-                        contentDescription = s.name,
-                        modifier = Modifier.size(60.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF202C33)).clickable { onSendSticker(s) }.padding(4.dp)
+                    StickerWithSound(
+                        item = s,
+                        imageFile = imgFile,
+                        videoFile = null,
+                        audioFile = null,
+                        audioHelper = audioHelper,
+                        modifier = Modifier.size(60.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF202C33)),
+                        onOpen = { onSendSticker(s) }
                     )
                 }
             }
