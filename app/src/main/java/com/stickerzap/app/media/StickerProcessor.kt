@@ -69,7 +69,48 @@ object StickerProcessor {
         return out
     }
 
-    private fun drawMemeText(canvas: Canvas, text: String, y: Float) {
+    /**
+     * Draws [source] into a 512×512 sticker. A non-square crop is letterboxed
+     * when [fitWithPadding] is true; a square crop fills the canvas.
+     */
+    fun renderSquareFrame(
+        source: Bitmap,
+        cropLeft: Float,
+        cropTop: Float,
+        cropRight: Float,
+        cropBottom: Float,
+        fitWithPadding: Boolean,
+        topText: String,
+        bottomText: String
+    ): Bitmap {
+        val out = Bitmap.createBitmap(512, 512, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        val sw = source.width.toFloat().coerceAtLeast(1f)
+        val sh = source.height.toFloat().coerceAtLeast(1f)
+        val left = (cropLeft * sw).coerceIn(0f, sw - 1f)
+        val top = (cropTop * sh).coerceIn(0f, sh - 1f)
+        val right = (cropRight * sw).coerceIn(left + 1f, sw)
+        val bottom = (cropBottom * sh).coerceIn(top + 1f, sh)
+        val srcRect = Rect(left.toInt(), top.toInt(), right.toInt(), bottom.toInt())
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        if (fitWithPadding) {
+            val cropW = (right - left).coerceAtLeast(1f)
+            val cropH = (bottom - top).coerceAtLeast(1f)
+            val scale = minOf(512f / cropW, 512f / cropH)
+            val dw = cropW * scale
+            val dh = cropH * scale
+            val dx = (512f - dw) / 2f
+            val dy = (512f - dh) / 2f
+            canvas.drawBitmap(source, srcRect, RectF(dx, dy, dx + dw, dy + dh), paint)
+        } else {
+            canvas.drawBitmap(source, srcRect, RectF(0f, 0f, 512f, 512f), paint)
+        }
+        drawMemeText(canvas, topText, 68f)
+        drawMemeText(canvas, bottomText, 472f)
+        return out
+    }
+
+    fun drawMemeText(canvas: Canvas, text: String, y: Float) {
         val clean = text.trim().uppercase()
         if (clean.isEmpty()) return
 
@@ -120,15 +161,35 @@ object StickerProcessor {
         FileOutputStream(destFile).use { it.write(bytes) }
     }
 
-    fun saveTrayIcon96(bitmap: Bitmap, destFile: File) {
+    fun encodeTrayPng(bitmap: Bitmap): ByteArray {
         val scaled = Bitmap.createScaledBitmap(bitmap, 96, 96, true)
-        FileOutputStream(destFile).use {
-            if (!scaled.compress(Bitmap.CompressFormat.PNG, 100, it)) {
-                throw IllegalStateException("Falha ao salvar o ícone da bandeja.")
+        try {
+            val candidates = ArrayList<Bitmap>(2)
+            candidates.add(scaled)
+            val opaque = scaled.copy(Bitmap.Config.RGB_565, false)
+            if (opaque != null && opaque != scaled) candidates.add(opaque)
+            var last = ByteArray(0)
+            for (candidate in candidates) {
+                val baos = ByteArrayOutputStream()
+                if (!candidate.compress(Bitmap.CompressFormat.PNG, 100, baos)) continue
+                last = baos.toByteArray()
+                if (last.size <= 50 * 1024) {
+                    candidates.forEach { if (it != scaled && it != bitmap && !it.isRecycled) it.recycle() }
+                    return last
+                }
             }
+            candidates.forEach { if (it != scaled && it != bitmap && !it.isRecycled) it.recycle() }
+            if (last.size > 50 * 1024) {
+                throw IllegalStateException("O ícone da bandeja passou de 50KB.")
+            }
+            throw IllegalStateException("Falha ao salvar o ícone da bandeja.")
+        } finally {
+            if (scaled != bitmap && !scaled.isRecycled) scaled.recycle()
         }
-        if (destFile.length() > 50 * 1024) {
-            throw IllegalStateException("O ícone da bandeja passou de 50KB.")
-        }
+    }
+
+    fun saveTrayIcon96(bitmap: Bitmap, destFile: File) {
+        val bytes = encodeTrayPng(bitmap)
+        FileOutputStream(destFile).use { it.write(bytes) }
     }
 }

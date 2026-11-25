@@ -19,3 +19,14 @@ O wrapper usa **Gradle 8.9**. Se `gradle/wrapper/gradle-wrapper.jar` não estive
 ## Figurinhas com som
 
 O estúdio grava e reproduz áudio no preview interno. A API oficial de terceiros do WhatsApp **ainda não aceita figurinhas com som**, então o áudio não entra no pacote importado. Detalhes em [docs/research-sound-stickers.md](docs/research-sound-stickers.md).
+
+## Changelog
+
+### 4.0 — vídeo para figurinha animada
+
+- Importa um vídeo, escolhe um trecho (padrão até 3 s, máximo 10 s na figurinha e 5 s no caminho com som) e recorta em quadrado.
+- Gera WebP animado 512×512 de até 500 KB e guarda o áudio do trecho para o preview dentro do app. A figurinha fica muda até tocar no alto-falante, que toca o clipe 3 vezes, como no WhatsApp.
+- **Compartilhar áudio** envia o clipe `.m4a` para o WhatsApp (ou para outro app, se o WhatsApp não estiver instalado).
+- **Fazer com som no WhatsApp** salva o vídeo quadrado em `Movies/StickerZap` e o áudio em `Music/StickerZap`, mostra o passo a passo do editor do próprio WhatsApp e abre o app.
+
+O som não entra pela API oficial de pacotes. No WhatsApp, a figurinha do álbum chega animada e sem som. Uma figurinha com som é um WebP mais um `AudioMessage` Opus separado, e só o editor do WhatsApp anexa esse áudio. Em 24/11/2026 a equipe do WhatsApp respondeu que a API para terceiros ainda não existe, mas está no roadmap: [WhatsApp/stickers#1163](https://github.com/WhatsApp/stickers/issues/1163). Este app não usa hacks de protocolo (Baileys, WhatsApp Web ou similares). A análise do formato na rede está em [docs/research-sound-stickers.md](docs/research-sound-stickers.md) e em [WhiskeySockets/Baileys#2932](https://github.com/WhiskeySockets/Baileys/issues/2932).

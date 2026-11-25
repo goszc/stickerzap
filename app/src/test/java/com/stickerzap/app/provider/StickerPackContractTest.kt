@@ -59,6 +59,27 @@ class StickerPackContractTest {
     }
 
     @Test
+    fun providerDoesNotServeAudio() {
+        assertTrue(StickerPackContract.isPublicStickerAsset("stk_ab.webp"))
+        assertTrue(StickerPackContract.isPublicStickerAsset("tray.PNG"))
+        assertFalse(StickerPackContract.isPublicStickerAsset("snd_ab.m4a"))
+        assertFalse(StickerPackContract.isPublicStickerAsset("clip.ogg"))
+        assertFalse(StickerPackContract.isPublicStickerAsset("clip.opus"))
+        assertFalse(StickerPackContract.isPublicStickerAsset("../tray.png"))
+        assertFalse(StickerPackContract.isPublicStickerAsset("a/b.webp"))
+    }
+
+    @Test
+    fun animatedLimitsMatchWhatsAppRules() {
+        assertTrue(StickerPackContract.ANIMATED_STICKER_PACK == "animated_sticker_pack")
+        assertTrue(StickerPackContract.ANIMATED_STICKER_MAX_BYTES == 500 * 1024)
+        assertTrue(StickerPackContract.MAX_ANIMATION_DURATION_MS == 10_000)
+        assertTrue(StickerPackContract.MIN_FRAME_DURATION_MS == 8)
+        assertTrue(StickerPackContract.STATIC_ACCESSIBILITY_MAX == 125)
+        assertTrue(StickerPackContract.ANIMATED_ACCESSIBILITY_MAX == 255)
+    }
+
+    @Test
     fun sanitizeEmojisNeverEmptyAndCapsAtThree() {
         assertTrue(StickerPackContract.sanitizeEmojis(emptyList()) == listOf("😄"))
         assertTrue(StickerPackContract.sanitizeEmojis(listOf(" ", "")) == listOf("😄"))

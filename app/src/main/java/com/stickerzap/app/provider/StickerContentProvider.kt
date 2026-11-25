@@ -117,7 +117,12 @@ class StickerContentProvider : ContentProvider() {
         val cursor = MatrixCursor(StickerPackContract.STICKER_COLUMNS)
         pack?.stickers?.forEach { s ->
             val emojis = StickerPackContract.sanitizeEmojis(s.emojis).joinToString(",")
-            cursor.addRow(arrayOf(s.imageFileName, emojis, s.name))
+            val limit = if (pack.animatedStickerPack || s.isAnimated) {
+                StickerPackContract.ANIMATED_ACCESSIBILITY_MAX
+            } else {
+                StickerPackContract.STATIC_ACCESSIBILITY_MAX
+            }
+            cursor.addRow(arrayOf(s.imageFileName, emojis, s.name.take(limit)))
         }
         return cursor
     }
@@ -139,8 +144,8 @@ class StickerContentProvider : ContentProvider() {
         if (segments.size != 3) throw FileNotFoundException("Invalid URI: $uri")
         val identifier = segments[1]
         val fileName = segments[2]
-        if (identifier.isBlank() || fileName.isBlank() || ".." in fileName || fileName.contains('/')) {
-            throw FileNotFoundException("Invalid sticker path: $uri")
+        if (!StickerPackContract.isPublicStickerAsset(fileName) || identifier.isBlank() || ".." in identifier) {
+            throw FileNotFoundException("Unsupported sticker asset: $uri")
         }
         val file = File(repository.packDir(identifier), fileName)
         if (!file.exists()) throw FileNotFoundException("Missing sticker file: ${file.absolutePath}")

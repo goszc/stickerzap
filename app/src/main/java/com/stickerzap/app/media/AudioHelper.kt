@@ -53,24 +53,54 @@ class AudioHelper(private val context: Context) {
         }
     }
 
-    fun playFile(file: File, onComplete: () -> Unit = {}) {
+    private var playToken = 0
+
+    fun playFile(file: File, onComplete: () -> Unit = {}) = playLoops(file, 1, onComplete)
+
+    /** Plays [file] [loops] times. WhatsApp sound stickers loop the clip three times. */
+    fun playLoops(file: File, loops: Int, onComplete: () -> Unit = {}) {
         stopPlayback()
-        if (!file.exists()) {
+        val token = ++playToken
+        startLoop(file, loops, token, onComplete)
+    }
+
+    private fun startLoop(file: File, remaining: Int, token: Int, onComplete: () -> Unit) {
+        if (token != playToken) return
+        if (remaining <= 0 || !file.exists()) {
             onComplete()
             return
         }
-        player = MediaPlayer().apply {
-            setDataSource(file.absolutePath)
-            setOnCompletionListener {
-                stopPlayback()
-                onComplete()
+        try {
+            player = MediaPlayer().apply {
+                setDataSource(file.absolutePath)
+                setOnCompletionListener { mp ->
+                    try {
+                        mp.release()
+                    } catch (_: Exception) {
+                    }
+                    if (player === mp) player = null
+                    if (token != playToken) return@setOnCompletionListener
+                    startLoop(file, remaining - 1, token, onComplete)
+                }
+                setOnErrorListener { mp, _, _ ->
+                    try {
+                        mp.release()
+                    } catch (_: Exception) {
+                    }
+                    if (player === mp) player = null
+                    if (token == playToken) onComplete()
+                    true
+                }
+                prepare()
+                start()
             }
-            prepare()
-            start()
+        } catch (_: Exception) {
+            onComplete()
         }
     }
 
     fun stopPlayback() {
+        playToken++
         try {
             player?.apply {
                 if (isPlaying) stop()

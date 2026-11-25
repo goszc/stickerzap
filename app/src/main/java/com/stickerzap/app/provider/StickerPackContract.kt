@@ -56,6 +56,11 @@ object StickerPackContract {
     const val MIN_EMOJIS = 1
     const val MAX_EMOJIS = 3
     const val STATIC_STICKER_MAX_BYTES = 100 * 1024
+    const val ANIMATED_STICKER_MAX_BYTES = 500 * 1024
+    const val MAX_ANIMATION_DURATION_MS = 10_000
+    const val MIN_FRAME_DURATION_MS = 8
+    const val STATIC_ACCESSIBILITY_MAX = 125
+    const val ANIMATED_ACCESSIBILITY_MAX = 255
     const val TRAY_MAX_BYTES = 50 * 1024
     const val STICKER_SIZE_PX = 512
     const val TRAY_SIZE_PX = 96
@@ -79,5 +84,12 @@ object StickerPackContract {
     fun sanitizeEmojis(emojis: List<String>): List<String> {
         val cleaned = emojis.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_EMOJIS)
         return if (cleaned.isEmpty()) listOf("😄") else cleaned
+    }
+
+    /** Audio never leaves the app through the sticker ContentProvider. */
+    fun isPublicStickerAsset(fileName: String): Boolean {
+        if (fileName.isBlank() || ".." in fileName || '/' in fileName || '\\' in fileName) return false
+        val lower = fileName.lowercase(java.util.Locale.US)
+        return lower.endsWith(".webp") || lower.endsWith(".png")
     }
 }
