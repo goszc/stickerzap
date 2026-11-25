@@ -1,0 +1,24 @@
+# Gradle / Android Studio
+.gradle/
+build/
+app/build/
+.idea/
+*.iml
+.kotlin/
+local.properties
+.externalNativeBuild/
+.cxx/
+captures/
+.DS_Store
+
+# Built artifacts
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+
+# Signing (never commit real keystores)
+*.jks
+*.keystore
+!debug.keystore
